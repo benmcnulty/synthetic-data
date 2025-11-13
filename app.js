@@ -20,6 +20,30 @@ const DEFAULT_SCHEMA = {
 
 const MAX_RETRIES_PER_RECORD = 3;
 const MAX_FAILURE_RATIO = 0.25;
+const SEED_ADJECTIVES = [
+  "crimson",
+  "emerald",
+  "saffron",
+  "cerulean",
+  "umber",
+  "velvet",
+  "lunar",
+  "solar",
+  "mariner",
+  "orchid",
+];
+const SEED_NOUNS = [
+  "falcon",
+  "nebula",
+  "harbor",
+  "quartz",
+  "prairie",
+  "vertex",
+  "compass",
+  "harvest",
+  "cipher",
+  "aurora",
+];
 
 const clone = typeof structuredClone === "function"
   ? (value) => structuredClone(value)
@@ -34,16 +58,25 @@ const state = {
   dataset: [],
   generating: false,
   stopRequested: false,
+  phase: "Idle",
+  statusMessage: "Idle",
+  primarySeeds: [],
+  primaryField: null,
   stats: {
     requested: 0,
+    seeded: 0,
     generated: 0,
     failed: 0,
     currentIndex: 0,
   },
   log: [],
+  seedHints: [],
 };
 
 let signatureSet = new Set();
+let runContext = {
+  seedHints: [],
+};
 
 const dom = {};
 
@@ -70,8 +103,10 @@ function cacheDom() {
   dom.startBtn = document.getElementById("start-generation");
   dom.stopBtn = document.getElementById("stop-generation");
   dom.clearBtn = document.getElementById("clear-dataset");
+  dom.phaseLabel = document.getElementById("phase-label");
   dom.statusLabel = document.getElementById("status-label");
   dom.requestedCount = document.getElementById("requested-count");
+  dom.seededCount = document.getElementById("seeded-count");
   dom.generatedCount = document.getElementById("generated-count");
   dom.failedCount = document.getElementById("failed-count");
   dom.currentIndex = document.getElementById("current-index");
@@ -309,10 +344,15 @@ function clearDataset() {
   if (!confirmed) return;
   state.dataset = [];
   signatureSet = new Set();
+  state.primarySeeds = [];
+  state.primaryField = null;
   localStorage.setItem(STORAGE_KEYS.dataset, JSON.stringify(state.dataset));
   state.stats.generated = 0;
+  state.stats.seeded = 0;
   state.stats.failed = 0;
   state.stats.currentIndex = 0;
+  state.phase = "Idle";
+  state.statusMessage = "Idle";
   renderDatasetTable();
   updateStats();
   logEvent("Dataset cleared.");
@@ -321,8 +361,13 @@ function clearDataset() {
 function updateStats() {
   state.stats.requested = state.schema.recordCount;
   state.stats.generated = state.dataset.length;
-  dom.statusLabel.textContent = state.generating ? "Generating…" : "Idle";
+  if (state.generating) {
+    state.statusMessage = "Generating…";
+  }
+  dom.phaseLabel.textContent = state.phase;
+  dom.statusLabel.textContent = state.statusMessage;
   dom.requestedCount.textContent = state.stats.requested;
+  dom.seededCount.textContent = state.stats.seeded;
   dom.generatedCount.textContent = state.stats.generated;
   dom.failedCount.textContent = state.stats.failed;
   dom.currentIndex.textContent = state.stats.currentIndex;
@@ -344,7 +389,11 @@ function logEvent(message) {
 
 function renderDatasetTable() {
   const container = dom.datasetTableContainer;
-  if (!state.dataset.length) {
+  const totalRows = Math.max(
+    state.primarySeeds.length,
+    state.dataset.length
+  );
+  if (!totalRows) {
     container.innerHTML = '<p class="status-text">No records generated yet.</p>';
     return;
   }
@@ -365,30 +414,50 @@ function renderDatasetTable() {
   table.appendChild(thead);
 
   const tbody = document.createElement("tbody");
-  state.dataset.forEach((record, index) => {
+  for (let index = 0; index < totalRows; index++) {
+    const recordId = `record-${index + 1}`;
+    const datasetRecord = state.dataset.find((item) => item.id === recordId);
+    const record = datasetRecord || { id: recordId };
+    const isComplete = Boolean(datasetRecord);
     const row = document.createElement("tr");
+    if (!isComplete) row.classList.add("pending-row");
     ["id", ...state.schema.fields.map((f) => f.name)].forEach((key) => {
       const cell = document.createElement("td");
       const editable = key !== "id";
-      cell.appendChild(createEditableCell(index, key, record[key], editable));
+      if (!isComplete && key !== "id") {
+        if (state.primaryField && key === state.primaryField.name) {
+          cell.textContent = state.primarySeeds[index] || "pending…";
+        } else {
+          cell.textContent = "pending…";
+        }
+      } else {
+        cell.appendChild(
+          createEditableCell(recordId, key, record[key], editable)
+        );
+      }
       row.appendChild(cell);
     });
     const statusCell = document.createElement("td");
-    const signature = recordSignature(record);
-    if ((signatureCounts.get(signature) || 0) > 1) {
-      statusCell.innerHTML = '<span class="duplicate-badge">⚠️ duplicate</span>';
+    if (!isComplete) {
+      statusCell.innerHTML =
+        '<span class="status-badge pending">pending expansion</span>';
     } else {
-      statusCell.textContent = "unique";
+      const signature = recordSignature(record);
+      if ((signatureCounts.get(signature) || 0) > 1) {
+        statusCell.innerHTML = '<span class="duplicate-badge">⚠️ duplicate</span>';
+      } else {
+        statusCell.textContent = "unique";
+      }
     }
     row.appendChild(statusCell);
     tbody.appendChild(row);
-  });
+  }
   table.appendChild(tbody);
   container.innerHTML = "";
   container.appendChild(table);
 }
 
-function createEditableCell(recordIndex, key, value, editable = true) {
+function createEditableCell(recordId, key, value, editable = true) {
   const wrapper = document.createElement("div");
   wrapper.className = "cell-edit";
   const display = document.createElement("span");
@@ -404,13 +473,13 @@ function createEditableCell(recordIndex, key, value, editable = true) {
   }
   button.addEventListener("click", () => {
     if (!editable) return;
-    enterCellEdit(wrapper, recordIndex, key, value);
+    enterCellEdit(wrapper, recordId, key, value);
   });
   wrapper.appendChild(button);
   return wrapper;
 }
 
-function enterCellEdit(wrapper, index, key, initialValue) {
+function enterCellEdit(wrapper, recordId, key, initialValue) {
   if (wrapper.querySelector("input, textarea")) return;
   const fieldType = key === "id" ? "string" : getFieldType(key);
   const input =
@@ -434,7 +503,7 @@ function enterCellEdit(wrapper, index, key, initialValue) {
   const commit = () => {
     let newValue = input.value;
     if (fieldType === "boolean") newValue = input.checked;
-    updateRecordField(index, key, coerceValue(newValue, fieldType));
+    updateRecordField(recordId, key, coerceValue(newValue, fieldType));
   };
 
   input.addEventListener("keydown", (e) => {
@@ -449,7 +518,9 @@ function enterCellEdit(wrapper, index, key, initialValue) {
   });
 }
 
-function updateRecordField(recordIndex, key, newValue) {
+function updateRecordField(recordId, key, newValue) {
+  const recordIndex = state.dataset.findIndex((item) => item.id === recordId);
+  if (recordIndex === -1) return;
   const record = state.dataset[recordIndex];
   const oldValue = record[key];
   record[key] = newValue;
@@ -457,7 +528,7 @@ function updateRecordField(recordIndex, key, newValue) {
   rebuildSignatureSet();
   renderDatasetTable();
   logEvent(
-    `Edited record #${recordIndex + 1}: field "${key}" ${oldValue} → ${newValue}`
+    `Edited record #${parseInt(recordId.replace("record-", ""), 10)}: field "${key}" ${oldValue} → ${newValue}`
   );
 }
 
@@ -489,7 +560,7 @@ function rebuildSignatureSet() {
 }
 
 function recordSignature(record) {
-  const keys = Object.keys(record).filter((k) => k !== "__meta").sort();
+  const keys = Object.keys(record).filter((k) => k !== "__meta" && k !== "id").sort();
   const pairs = keys.map((key) => [key, record[key]]);
   return JSON.stringify(pairs);
 }
@@ -517,18 +588,61 @@ async function startGeneration() {
   signatureSet = new Set();
   state.stats.failed = 0;
   state.stats.generated = 0;
+  state.stats.seeded = 0;
   state.stats.currentIndex = 0;
   state.log = [];
+  runContext.seedHints = createSeedHints(state.schema.recordCount);
+  state.seedHints = runContext.seedHints;
+  state.primarySeeds = [];
+  state.primaryField = getPrimaryField();
+  state.phase = state.primaryField ? "Seeding" : "Expanding";
+  state.statusMessage = "Generating…";
   renderLog();
   renderDatasetTable();
+  updateStats();
   localStorage.setItem(STORAGE_KEYS.dataset, JSON.stringify(state.dataset));
 
   state.generating = true;
   state.stopRequested = false;
   dom.startBtn.disabled = true;
   dom.stopBtn.disabled = false;
-  dom.statusLabel.textContent = "Generating…";
   logEvent("Generation started.");
+  logEvent(`Prepared ${runContext.seedHints.length} unique seed hints for this run.`);
+  if (state.primaryField) {
+    try {
+      const seeds = await requestPrimarySeeds(state.schema.recordCount);
+      if (state.stopRequested) {
+        finishGeneration("Stopped by User");
+        return;
+      }
+      state.primarySeeds = seeds;
+      state.stats.seeded = seeds.length;
+      logEvent(
+        `Received ${seeds.length} unique "${state.primaryField.name}" seeds.`
+      );
+      renderDatasetTable();
+      updateStats();
+    } catch (err) {
+      logEvent(
+        `Seed generation failed (${err.message}). Falling back to single-pass generation.`
+      );
+      state.primarySeeds = [];
+      state.stats.seeded = 0;
+      state.phase = "Expanding";
+      renderDatasetTable();
+      updateStats();
+    }
+  } else {
+    logEvent("No string/text field found; running single-pass generation.");
+  }
+
+  if (!state.primarySeeds.length) {
+    state.primarySeeds = Array.from({ length: state.schema.recordCount }, () => null);
+    renderDatasetTable();
+  }
+
+  state.phase = "Expanding";
+  updateStats();
 
   await runGenerationLoop();
 }
@@ -547,23 +661,37 @@ async function runGenerationLoop() {
     state.stats.currentIndex = index + 1;
     updateStats();
     let success = false;
+    const seedHint = runContext.seedHints[index] || `seed-${index + 1}`;
+    const primaryValue = state.primarySeeds[index] || null;
 
     for (let attempt = 1; attempt <= MAX_RETRIES_PER_RECORD; attempt++) {
       try {
-        const record = await generateRecord(index);
+        const record = await generateRecord(index, primaryValue);
         const signature = recordSignature(record);
         if (signatureSet.has(signature)) {
-          logEvent(`[#${index + 1}] duplicate detected; retry ${attempt}`);
+          logEvent(
+            `[#${index + 1}] duplicate detected for seed "${seedHint}"${
+              primaryValue ? ` / primary "${primaryValue}"` : ""
+            }; retry ${attempt}`
+          );
           continue;
         }
         signatureSet.add(signature);
         state.dataset.push(record);
         state.stats.generated = state.dataset.length;
-        logEvent(`[#${index + 1}] success (${attempt} attempt${attempt > 1 ? "s" : ""})`);
+        logEvent(
+          `[#${index + 1}] success for seed "${seedHint}"${
+            primaryValue ? ` / primary "${primaryValue}"` : ""
+          } (${attempt} attempt${attempt > 1 ? "s" : ""})`
+        );
         success = true;
         break;
       } catch (err) {
-        logEvent(`[#${index + 1}] attempt ${attempt} failed: ${err.message}`);
+        logEvent(
+          `[#${index + 1}] attempt ${attempt} for seed "${seedHint}"${
+            primaryValue ? ` / primary "${primaryValue}"` : ""
+          } failed: ${err.message}`
+        );
       }
     }
 
@@ -589,9 +717,10 @@ async function runGenerationLoop() {
 function finishGeneration(statusText) {
   state.generating = false;
   state.stopRequested = false;
+  state.phase = statusText;
+  state.statusMessage = statusText;
   dom.startBtn.disabled = false;
   dom.stopBtn.disabled = true;
-  dom.statusLabel.textContent = statusText;
   persistDataset();
   renderDatasetTable();
   updateStats();
@@ -601,22 +730,20 @@ function persistDataset() {
   localStorage.setItem(STORAGE_KEYS.dataset, JSON.stringify(state.dataset));
 }
 
-async function generateRecord(index) {
+async function generateRecord(index, primaryValue) {
   const url = normalizeBaseUrl(state.baseUrl);
+  const prompt = buildGenerationPrompt(index, primaryValue);
   const payload = {
     model: state.defaultModel || "",
     stream: false,
     messages: [
       {
         role: "system",
-        content:
-          "You generate a single strictly-valid JSON object matching the schema. No comments or extra text.",
+        content: prompt.systemContent,
       },
       {
         role: "user",
-        content: `SCHEMA: ${JSON.stringify(
-          state.schema
-        )}\nINDEX: ${index}\nReturn exactly one JSON object with these field names and plausible values.`,
+        content: prompt.userContent,
       },
     ],
   };
@@ -631,9 +758,222 @@ async function generateRecord(index) {
   }
   const data = await response.json();
   const content = data.message?.content || data.response || "";
-  const record = parseRecord(content);
-  record.id = `record-${index + 1}`;
-  return coerceRecord(record);
+  const rawRecord = parseRecord(content);
+  const sanitized = coerceRecord(rawRecord);
+  const record = {
+    ...sanitized,
+    id: `record-${index + 1}`,
+    __meta: { seedHint: prompt.seedHint },
+  };
+  return record;
+}
+
+async function requestPrimarySeeds(count) {
+  const primaryField = state.primaryField;
+  if (!primaryField || count <= 0) return [];
+  logEvent(
+    `Requesting ${count} unique "${primaryField.name}" values for seeding.`
+  );
+  const url = normalizeBaseUrl(state.baseUrl);
+  const payload = buildSeedPrompt(count, primaryField);
+  const response = await fetch(`${url}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Seed request failed with HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  const content = data.message?.content || data.response || "";
+  const rawSeeds = parseSeedList(content);
+  const uniqueSeeds = ensureUniqueSeeds(rawSeeds, count);
+  if (!uniqueSeeds.length) {
+    throw new Error("Seed payload empty");
+  }
+  return uniqueSeeds;
+}
+
+function buildSeedPrompt(count, primaryField) {
+  const hints = runContext.seedHints.slice(0, count);
+  const directives = [
+    "Return JSON only.",
+    "Each value must be distinct and human plausible.",
+    "Prefer diverse surnames, regions, and professions if context implies names.",
+  ].join(" ");
+
+  return {
+    model: state.defaultModel || "",
+    stream: false,
+    messages: [
+      {
+        role: "system",
+        content: `You invent unique values for the field "${primaryField.name}" described as "${primaryField.description || "no description"}". Output JSON array of strings.`,
+      },
+      {
+        role: "user",
+        content: [
+          `DATASET: ${state.schema.name}`,
+          `FIELD: ${primaryField.name} (${primaryField.type})`,
+          `COUNT: ${count}`,
+          `SEED_HINTS: ${JSON.stringify(hints)}`,
+          directives,
+          "Example output: [\"Aria Solberg\", \"Mateo Idris\", \"Liang Novak\"]",
+        ].join("\n"),
+      },
+    ],
+  };
+}
+
+function parseSeedList(content) {
+  let text = (content || "").trim();
+  if (!text) throw new Error("Empty seed response");
+  const fenced = text.match(/```json([\s\S]*?)```/i);
+  if (fenced) text = fenced[1].trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    const firstBracket = text.indexOf("[");
+    const lastBracket = text.lastIndexOf("]");
+    if (firstBracket !== -1 && lastBracket !== -1) {
+      const slice = text.slice(firstBracket, lastBracket + 1);
+      parsed = JSON.parse(slice);
+    } else {
+      throw new Error("Seed response not JSON array");
+    }
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("Seed payload not array");
+  }
+  const primaryField = state.primaryField;
+  return parsed
+    .map((entry) => {
+      if (typeof entry === "string") return entry.trim();
+      if (entry && typeof entry === "object") {
+        if (primaryField && entry[primaryField.name]) {
+          return String(entry[primaryField.name]).trim();
+        }
+        const firstValue = Object.values(entry)[0];
+        return firstValue ? String(firstValue).trim() : "";
+      }
+      return "";
+    })
+    .filter((value) => value && value.length > 1);
+}
+
+function ensureUniqueSeeds(seeds, count) {
+  const result = [];
+  const seen = new Set();
+  seeds.forEach((seed) => {
+    const normalized = seed.toLowerCase();
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    result.push(seed);
+  });
+  while (result.length < count) {
+    const fallback = generateFallbackSeed(seen);
+    result.push(fallback);
+    seen.add(fallback.toLowerCase());
+  }
+  return result.slice(0, count);
+}
+
+function generateFallbackSeed(existingSet) {
+  const adjective = capitalize(
+    SEED_ADJECTIVES[Math.floor(Math.random() * SEED_ADJECTIVES.length)]
+  );
+  const noun = capitalize(
+    SEED_NOUNS[Math.floor(Math.random() * SEED_NOUNS.length)]
+  );
+  const token = randomToken();
+  let candidate = `${adjective} ${noun} ${token}`;
+  let attempts = 0;
+  while (existingSet.has(candidate.toLowerCase()) && attempts < 5) {
+    candidate = `${adjective} ${noun} ${randomToken()}`;
+    attempts += 1;
+  }
+  return candidate;
+}
+
+function getPrimaryField() {
+  const fields = state.schema.fields || [];
+  const eligible = fields.filter((field) =>
+    ["string", "text"].includes(field.type)
+  );
+  if (!eligible.length) return null;
+  const nameLike = eligible.find((field) => /name/i.test(field.name));
+  return nameLike || eligible[0];
+}
+
+function buildGenerationPrompt(index, primaryValue) {
+  const seedHint =
+    runContext.seedHints[index] ||
+    `fallback-seed-${index + 1}-${randomToken()}`;
+  const seedBrief = describeSeed(seedHint);
+  const primaryField = state.primaryField;
+  const fieldRequirements = state.schema.fields
+    .map((field) => {
+      if (primaryField && primaryValue && field.name === primaryField.name) {
+        return `* ${field.name} (${field.type}) — REQUIRED. Use the exact value "${primaryValue}" (seeded unique value).`;
+      }
+      return `* ${field.name} (${field.type}) — REQUIRED, must be non-empty and reflect ${field.description || "the field description"}.`;
+    })
+    .join("\n");
+  const forbiddenText = buildForbiddenValuesSummary();
+  const recentRecords = state.dataset.slice(-5);
+  const schemaSummary = JSON.stringify(
+    {
+      name: state.schema.name,
+      fields: state.schema.fields.map(({ name, type, description }) => ({
+        name,
+        type,
+        description,
+      })),
+    },
+    null,
+    2
+  );
+  const fieldNames = state.schema.fields.map((f) => f.name).join(", ");
+  const systemContent = [
+    "You are an on-device synthetic data generator.",
+    "Produce strictly valid JSON objects only—no prose, markdown, or comments.",
+    "Use the EXACT field keys provided; casing and spelling must match precisely.",
+    "Every field is mandatory and must hold a plausible, non-empty value appropriate for its type.",
+    "Every record must be unique; if your draft matches earlier data, adjust it internally before responding.",
+    "Always let the provided SEED_BRIEF influence names, numbers, and story elements so each record feels distinct.",
+  ].join(" ");
+
+  const uniquenessDirectives = [
+    "- Leverage SEED_BRIEF imagery for naming choices.",
+    "- Vary numeric magnitudes and dates across records.",
+    "- Avoid repeating the same string values that appear in RECENT_RECORDS.",
+  ].join("\n");
+
+  const userContent = [
+    `SEED_HINT: ${seedHint}`,
+    `SEED_BRIEF: ${seedBrief}`,
+    `REQUEST: Record ${index + 1} of ${state.schema.recordCount} for dataset "${state.schema.name}".`,
+    primaryField && primaryValue
+      ? `PRIMARY_FIELD_NAME: ${primaryField.name}\nPRIMARY_VALUE (use exactly): ${primaryValue}`
+      : null,
+    "SCHEMA (JSON):",
+    schemaSummary,
+    "FIELD_REQUIREMENTS:",
+    fieldRequirements,
+    "FORBIDDEN_FIELD_VALUES (never repeat these exact values):",
+    forbiddenText,
+    "RECENT_RECORDS (do NOT repeat any values):",
+    recentRecords.length ? JSON.stringify(recentRecords, null, 2) : "[]",
+    "UNIQUENESS_DIRECTIVES:",
+    uniquenessDirectives,
+    `Output EXACTLY one JSON object with keys [${fieldNames}] and no surrounding text.`,
+    "MANDATORY: populate every key with a concrete value inspired by SEED_BRIEF; never leave blanks, nulls, or filler placeholders.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return { seedHint, systemContent, userContent };
 }
 
 function parseRecord(content) {
@@ -655,31 +995,58 @@ function parseRecord(content) {
 }
 
 function coerceRecord(record) {
-  const coerced = { ...record };
+  const coerced = {};
   state.schema.fields.forEach((field) => {
-    coerced[field.name] = coerceValue(coerced[field.name], field.type);
+    if (!(field.name in record)) {
+      throw new Error(`Missing required field "${field.name}"`);
+    }
+    coerced[field.name] = coerceValue(record[field.name], field.type, field.name);
   });
   return coerced;
 }
 
-function coerceValue(value, type) {
-  if (value === undefined || value === null) return "";
+function coerceValue(value, type, fieldName) {
+  if (value === undefined || value === null) {
+    throw new Error(`Field "${fieldName}" is empty`);
+  }
   switch (type) {
-    case "integer":
-      return Number.parseInt(value, 10) || 0;
-    case "number":
-      return Number.parseFloat(value) || 0;
-    case "boolean":
+    case "integer": {
+      const parsed = Number.parseInt(value, 10);
+      if (Number.isNaN(parsed)) {
+        throw new Error(`Field "${fieldName}" must be an integer`);
+      }
+      return parsed;
+    }
+    case "number": {
+      const parsed = Number.parseFloat(value);
+      if (Number.isNaN(parsed)) {
+        throw new Error(`Field "${fieldName}" must be numeric`);
+      }
+      return parsed;
+    }
+    case "boolean": {
       if (typeof value === "boolean") return value;
-      return String(value).toLowerCase() === "true";
+      const normalized = String(value).trim().toLowerCase();
+      if (normalized === "true") return true;
+      if (normalized === "false") return false;
+      throw new Error(`Field "${fieldName}" must be boolean`);
+    }
     case "date": {
       const date = new Date(value);
-      return isNaN(date.getTime()) ? new Date().toISOString().split("T")[0] : date.toISOString().split("T")[0];
+      if (Number.isNaN(date.getTime())) {
+        throw new Error(`Field "${fieldName}" must be a valid date`);
+      }
+      return date.toISOString().split("T")[0];
     }
     case "text":
     case "string":
-    default:
-      return String(value);
+    default: {
+      const text = String(value).trim();
+      if (!text) {
+        throw new Error(`Field "${fieldName}" cannot be blank`);
+      }
+      return type === "text" ? text : text;
+    }
   }
 }
 
@@ -689,4 +1056,63 @@ function normalizeBaseUrl(url) {
 
 function clampNumber(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function createSeedHints(count) {
+  const hints = [];
+  for (let i = 0; i < count; i++) {
+    const adjective = SEED_ADJECTIVES[i % SEED_ADJECTIVES.length];
+    const noun = SEED_NOUNS[(i + 3) % SEED_NOUNS.length];
+    const token = randomToken();
+    hints.push(`${adjective}-${noun}-${token}`);
+  }
+  return hints;
+}
+
+function randomToken() {
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    const bytes = new Uint8Array(4);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 6);
+  }
+  return Math.random().toString(16).slice(2, 8);
+}
+
+function describeSeed(seed) {
+  const parts = seed.split("-").filter(Boolean);
+  const [first = "vivid", second = "signal", token = randomToken()] = parts;
+  const adjective = capitalize(first);
+  const noun = capitalize(second);
+  return `Blend the mood of "${adjective} ${noun}" with variation token ${token.toUpperCase()} to invent unique people, settings, and numeric details.`;
+}
+
+function capitalize(value) {
+  if (!value) return "";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function buildForbiddenValuesSummary(limit = 6) {
+  const lines = [];
+  state.schema.fields.forEach((field) => {
+    const values = getRecentValuesForField(field.name, limit);
+    if (values.length) {
+      lines.push(`- ${field.name}: ${values.join(", ")}`);
+    }
+  });
+  return lines.length ? lines.join("\n") : "- none recorded yet";
+}
+
+function getRecentValuesForField(fieldName, limit = 6) {
+  const seen = new Set();
+  const values = [];
+  for (let i = state.dataset.length - 1; i >= 0 && values.length < limit; i--) {
+    const value = state.dataset[i][fieldName];
+    if (value === undefined || value === null) continue;
+    const key = String(value).trim().toLowerCase();
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    values.push(String(value));
+  }
+  return values;
 }

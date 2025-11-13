@@ -1,0 +1,17 @@
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Build/test artifacts (future-proofing)
+dist/
+build/
+node_modules/
+coverage/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.*
