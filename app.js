@@ -14,6 +14,7 @@ const DEFAULT_SCHEMA = {
       name: "fullName",
       type: "string",
       description: "Realistic full name",
+      distribution: 0,
     },
   ],
 };
@@ -44,6 +45,42 @@ const SEED_NOUNS = [
   "cipher",
   "aurora",
 ];
+const FALLBACK_FIRST_NAMES = [
+  "Aria",
+  "Mateo",
+  "Lena",
+  "Dorian",
+  "Siena",
+  "Noah",
+  "Kai",
+  "Mara",
+  "Elena",
+  "Rowan",
+];
+const FALLBACK_LAST_NAMES = [
+  "Solberg",
+  "Quinn",
+  "Ishikawa",
+  "Rios",
+  "Banerjee",
+  "Novak",
+  "Adebayo",
+  "Petrov",
+  "Hale",
+  "Carver",
+];
+const FALLBACK_JOB_TITLES = [
+  "Product Strategist",
+  "Field Ecologist",
+  "Data Ethicist",
+  "Urban Systems Analyst",
+  "Renewable Grid Architect",
+  "Clinical AI Specialist",
+  "Cultural Programs Lead",
+  "Autonomy Safety Engineer",
+  "Growth Partnerships Manager",
+  "Human Factors Researcher",
+];
 
 const clone = typeof structuredClone === "function"
   ? (value) => structuredClone(value)
@@ -60,8 +97,7 @@ const state = {
   stopRequested: false,
   phase: "Idle",
   statusMessage: "Idle",
-  primarySeeds: [],
-  primaryField: null,
+  fieldSeedPlans: {},
   stats: {
     requested: 0,
     seeded: 0,
@@ -124,10 +160,12 @@ function loadStateFromStorage() {
   const storedSchema = localStorage.getItem(STORAGE_KEYS.schema);
   if (storedSchema) {
     try {
-      state.schema = JSON.parse(storedSchema);
+      state.schema = normalizeSchema(JSON.parse(storedSchema));
     } catch {
       state.schema = clone(DEFAULT_SCHEMA);
     }
+  } else {
+    state.schema = clone(DEFAULT_SCHEMA);
   }
 
   const storedDataset = localStorage.getItem(STORAGE_KEYS.dataset);
@@ -139,6 +177,7 @@ function loadStateFromStorage() {
     }
   }
 
+  state.schema = normalizeSchema(state.schema);
   rebuildSignatureSet();
   state.stats.requested = state.schema.recordCount;
   state.stats.generated = state.dataset.length;
@@ -275,11 +314,16 @@ function renderFields() {
     const nameInput = row.querySelector(".field-name");
     const typeSelect = row.querySelector(".field-type");
     const descriptionInput = row.querySelector(".field-description");
+    const distributionInput = row.querySelector(".field-distribution");
+    const distributionValue = row.querySelector(".distribution-value");
     const removeButton = row.querySelector(".remove-field");
 
     nameInput.value = field.name;
     typeSelect.value = field.type;
     descriptionInput.value = field.description || "";
+    const distribution = typeof field.distribution === "number" ? field.distribution : 0;
+    distributionInput.value = distribution;
+    distributionValue.textContent = formatDistribution(distribution);
 
     nameInput.addEventListener("input", (e) => {
       field.name = e.target.value.trim();
@@ -293,6 +337,14 @@ function renderFields() {
     });
     descriptionInput.addEventListener("input", (e) => {
       field.description = e.target.value;
+      persistSchema();
+      renderSchemaPreview();
+    });
+    distributionInput.addEventListener("input", (e) => {
+      const value = Number.parseFloat(e.target.value);
+      field.distribution = clampNumber(isNaN(value) ? 0 : value, 0, 1);
+      distributionInput.value = field.distribution;
+      distributionValue.textContent = formatDistribution(field.distribution);
       persistSchema();
       renderSchemaPreview();
     });
@@ -324,6 +376,7 @@ function addField() {
     name: `field${count}`,
     type: "string",
     description: "",
+    distribution: 0,
   });
 }
 
@@ -332,6 +385,7 @@ function renderSchemaPreview() {
 }
 
 function persistSchema() {
+  state.schema = normalizeSchema(state.schema);
   localStorage.setItem(STORAGE_KEYS.schema, JSON.stringify(state.schema));
 }
 
@@ -344,8 +398,7 @@ function clearDataset() {
   if (!confirmed) return;
   state.dataset = [];
   signatureSet = new Set();
-  state.primarySeeds = [];
-  state.primaryField = null;
+  state.fieldSeedPlans = {};
   localStorage.setItem(STORAGE_KEYS.dataset, JSON.stringify(state.dataset));
   state.stats.generated = 0;
   state.stats.seeded = 0;
@@ -390,7 +443,7 @@ function logEvent(message) {
 function renderDatasetTable() {
   const container = dom.datasetTableContainer;
   const totalRows = Math.max(
-    state.primarySeeds.length,
+    state.schema.recordCount || 0,
     state.dataset.length
   );
   if (!totalRows) {
@@ -425,11 +478,8 @@ function renderDatasetTable() {
       const cell = document.createElement("td");
       const editable = key !== "id";
       if (!isComplete && key !== "id") {
-        if (state.primaryField && key === state.primaryField.name) {
-          cell.textContent = state.primarySeeds[index] || "pending…";
-        } else {
-          cell.textContent = "pending…";
-        }
+        const hintValue = getSeededValueForField(key, index);
+        cell.textContent = hintValue ? `${hintValue} (seed)` : "pending…";
       } else {
         cell.appendChild(
           createEditableCell(recordId, key, record[key], editable)
@@ -543,6 +593,10 @@ function formatValue(value) {
   return String(value);
 }
 
+function formatDistribution(value) {
+  return (value ?? 0).toFixed(2);
+}
+
 function computeSignatureCounts() {
   const map = new Map();
   state.dataset.forEach((record) => {
@@ -563,6 +617,89 @@ function recordSignature(record) {
   const keys = Object.keys(record).filter((k) => k !== "__meta" && k !== "id").sort();
   const pairs = keys.map((key) => [key, record[key]]);
   return JSON.stringify(pairs);
+}
+
+function getSeededValueForField(fieldName, index) {
+  const plan = state.fieldSeedPlans[fieldName];
+  if (!plan) return null;
+  return plan.assignments[index] || null;
+}
+
+function getSeedableFields() {
+  return (state.schema.fields || []).filter((field) =>
+    ["string", "text"].includes(field.type)
+  );
+}
+
+function computeUniqueSeedCount(field) {
+  const distribution =
+    typeof field.distribution === "number"
+      ? clampNumber(field.distribution, 0, 1)
+      : 0;
+  const total = state.schema.recordCount;
+  const uniqueCount = Math.max(
+    1,
+    Math.round(total * (1 - distribution))
+  );
+  return Math.min(uniqueCount, total);
+}
+
+function distributeSeedsAcrossRecords(seeds, total) {
+  if (!seeds.length) return Array(total).fill(null);
+  const expanded = [];
+  const copy = [...seeds];
+  while (expanded.length < total) {
+    expanded.push(copy[expanded.length % copy.length]);
+  }
+  return shuffleArray(expanded.slice(0, total));
+}
+
+function shuffleArray(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j =
+      typeof crypto !== "undefined" && crypto.getRandomValues
+        ? crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1)
+        : Math.floor(Math.random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
+function getSeedHintsForIndex(index) {
+  const hints = {};
+  Object.entries(state.fieldSeedPlans).forEach(([fieldName, plan]) => {
+    const value = plan.assignments[index];
+    if (value !== null && value !== undefined && String(value).trim() !== "") {
+      hints[fieldName] = value;
+    }
+  });
+  return hints;
+}
+
+function summarizeSeedHints(seedHints) {
+  const entries = Object.entries(seedHints);
+  if (!entries.length) return "";
+  return entries.map(([key, value]) => `${key}="${value}"`).join(", ");
+}
+
+function buildDistributionGuidance() {
+  if (!state.schema.fields?.length) return "No fields defined.";
+  return state.schema.fields
+    .map((field) => {
+      const dist =
+        typeof field.distribution === "number"
+          ? clampNumber(field.distribution, 0, 1)
+          : 0;
+      if (dist === 0) {
+        return `${field.name}: aim for fully unique values.`;
+      }
+      if (dist === 1) {
+        return `${field.name}: repeats acceptable; consistent shared value is fine.`;
+      }
+      const uniquePct = Math.round((1 - dist) * 100);
+      return `${field.name}: roughly ${uniquePct}% unique, ${100 - uniquePct}% repeatable.`;
+    })
+    .join("\n");
 }
 
 async function startGeneration() {
@@ -593,9 +730,8 @@ async function startGeneration() {
   state.log = [];
   runContext.seedHints = createSeedHints(state.schema.recordCount);
   state.seedHints = runContext.seedHints;
-  state.primarySeeds = [];
-  state.primaryField = getPrimaryField();
-  state.phase = state.primaryField ? "Seeding" : "Expanding";
+  state.fieldSeedPlans = {};
+  state.phase = "Seeding";
   state.statusMessage = "Generating…";
   renderLog();
   renderDatasetTable();
@@ -608,43 +744,95 @@ async function startGeneration() {
   dom.stopBtn.disabled = false;
   logEvent("Generation started.");
   logEvent(`Prepared ${runContext.seedHints.length} unique seed hints for this run.`);
-  if (state.primaryField) {
-    try {
-      const seeds = await requestPrimarySeeds(state.schema.recordCount);
-      if (state.stopRequested) {
-        finishGeneration("Stopped by User");
-        return;
-      }
-      state.primarySeeds = seeds;
-      state.stats.seeded = seeds.length;
-      logEvent(
-        `Received ${seeds.length} unique "${state.primaryField.name}" seeds.`
-      );
-      renderDatasetTable();
-      updateStats();
-    } catch (err) {
-      logEvent(
-        `Seed generation failed (${err.message}). Falling back to single-pass generation.`
-      );
-      state.primarySeeds = [];
-      state.stats.seeded = 0;
-      state.phase = "Expanding";
-      renderDatasetTable();
-      updateStats();
-    }
-  } else {
-    logEvent("No string/text field found; running single-pass generation.");
-  }
-
-  if (!state.primarySeeds.length) {
-    state.primarySeeds = Array.from({ length: state.schema.recordCount }, () => null);
-    renderDatasetTable();
+  await seedFields();
+  if (state.stopRequested) {
+    finishGeneration("Stopped by User");
+    return;
   }
 
   state.phase = "Expanding";
   updateStats();
 
   await runGenerationLoop();
+}
+
+async function seedFields() {
+  const seedableFields = getSeedableFields();
+  if (!seedableFields.length) {
+    logEvent("No seedable fields detected; proceeding without pre-seeding.");
+    state.stats.seeded = 0;
+    renderDatasetTable();
+    updateStats();
+    return;
+  }
+
+  const totalRecords = state.schema.recordCount;
+  for (const field of seedableFields) {
+    if (state.stopRequested) break;
+    state.phase = `Seeding: ${field.name}`;
+    updateStats();
+    const uniqueCount = computeUniqueSeedCount(field);
+    logEvent(
+      `Seeding field "${field.name}" with ${uniqueCount} unique values (distribution ${formatDistribution(
+        field.distribution
+      )}).`
+    );
+    try {
+      const seeds = await requestFieldSeeds(field, uniqueCount);
+      if (state.stopRequested) break;
+      const assignments = distributeSeedsAcrossRecords(seeds, totalRecords);
+      state.fieldSeedPlans[field.name] = { field, seeds, assignments };
+      state.stats.seeded = Object.values(state.fieldSeedPlans).reduce(
+        (sum, plan) => sum + plan.seeds.length,
+        0
+      );
+      renderDatasetTable();
+      updateStats();
+      logEvent(
+        `Field "${field.name}" seeding complete: ${planSummary(
+          state.fieldSeedPlans[field.name]
+        )}.`
+      );
+    } catch (err) {
+      logEvent(
+        `Field "${field.name}" seeding failed: ${err.message}. Using fallback generated tokens.`
+      );
+      const fallbackSeeds = ensureUniqueSeeds([], uniqueCount, field);
+      const assignments = distributeSeedsAcrossRecords(
+        fallbackSeeds,
+        totalRecords
+      );
+      state.fieldSeedPlans[field.name] = {
+        field,
+        seeds: fallbackSeeds,
+        assignments,
+      };
+      state.stats.seeded = Object.values(state.fieldSeedPlans).reduce(
+        (sum, plan) => sum + plan.seeds.length,
+        0
+      );
+      renderDatasetTable();
+      updateStats();
+      logEvent(
+        `Field "${field.name}" fallback seeding complete: ${planSummary(
+          state.fieldSeedPlans[field.name]
+        )}.`
+      );
+    }
+  }
+
+  if (state.stopRequested) {
+    return;
+  }
+}
+
+function planSummary(plan) {
+  if (!plan) return "";
+  const sampleSeeds = plan.seeds.slice(0, 3);
+  const sampleText = sampleSeeds.length ? sampleSeeds.join(", ") : "none";
+  return `${plan.seeds.length} unique values (sample: ${sampleText}${
+    plan.seeds.length > sampleSeeds.length ? ", …" : ""
+  })`;
 }
 
 async function runGenerationLoop() {
@@ -662,16 +850,17 @@ async function runGenerationLoop() {
     updateStats();
     let success = false;
     const seedHint = runContext.seedHints[index] || `seed-${index + 1}`;
-    const primaryValue = state.primarySeeds[index] || null;
+    const seedHints = getSeedHintsForIndex(index);
+    const seedSummaryText = summarizeSeedHints(seedHints);
 
     for (let attempt = 1; attempt <= MAX_RETRIES_PER_RECORD; attempt++) {
       try {
-        const record = await generateRecord(index, primaryValue);
+        const record = await generateRecord(index, seedHints);
         const signature = recordSignature(record);
         if (signatureSet.has(signature)) {
           logEvent(
             `[#${index + 1}] duplicate detected for seed "${seedHint}"${
-              primaryValue ? ` / primary "${primaryValue}"` : ""
+              seedSummaryText ? ` / seeded (${seedSummaryText})` : ""
             }; retry ${attempt}`
           );
           continue;
@@ -681,7 +870,7 @@ async function runGenerationLoop() {
         state.stats.generated = state.dataset.length;
         logEvent(
           `[#${index + 1}] success for seed "${seedHint}"${
-            primaryValue ? ` / primary "${primaryValue}"` : ""
+            seedSummaryText ? ` / seeded (${seedSummaryText})` : ""
           } (${attempt} attempt${attempt > 1 ? "s" : ""})`
         );
         success = true;
@@ -689,7 +878,7 @@ async function runGenerationLoop() {
       } catch (err) {
         logEvent(
           `[#${index + 1}] attempt ${attempt} for seed "${seedHint}"${
-            primaryValue ? ` / primary "${primaryValue}"` : ""
+            seedSummaryText ? ` / seeded (${seedSummaryText})` : ""
           } failed: ${err.message}`
         );
       }
@@ -730,9 +919,9 @@ function persistDataset() {
   localStorage.setItem(STORAGE_KEYS.dataset, JSON.stringify(state.dataset));
 }
 
-async function generateRecord(index, primaryValue) {
+async function generateRecord(index, seedHints) {
   const url = normalizeBaseUrl(state.baseUrl);
-  const prompt = buildGenerationPrompt(index, primaryValue);
+  const prompt = buildGenerationPrompt(index, seedHints);
   const payload = {
     model: state.defaultModel || "",
     stream: false,
@@ -763,19 +952,18 @@ async function generateRecord(index, primaryValue) {
   const record = {
     ...sanitized,
     id: `record-${index + 1}`,
-    __meta: { seedHint: prompt.seedHint },
+    __meta: { seedHint: prompt.seedHint, seedHints },
   };
   return record;
 }
 
-async function requestPrimarySeeds(count) {
-  const primaryField = state.primaryField;
-  if (!primaryField || count <= 0) return [];
+async function requestFieldSeeds(field, count) {
+  if (!field || count <= 0) return [];
   logEvent(
-    `Requesting ${count} unique "${primaryField.name}" values for seeding.`
+    `Requesting ${count} unique "${field.name}" values for seeding.`
   );
   const url = normalizeBaseUrl(state.baseUrl);
-  const payload = buildSeedPrompt(count, primaryField);
+  const payload = buildSeedPrompt(count, field);
   const response = await fetch(`${url}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -786,20 +974,19 @@ async function requestPrimarySeeds(count) {
   }
   const data = await response.json();
   const content = data.message?.content || data.response || "";
-  const rawSeeds = parseSeedList(content);
-  const uniqueSeeds = ensureUniqueSeeds(rawSeeds, count);
+  const rawSeeds = parseSeedList(content, field);
+  const uniqueSeeds = ensureUniqueSeeds(rawSeeds, count, field);
   if (!uniqueSeeds.length) {
     throw new Error("Seed payload empty");
   }
   return uniqueSeeds;
 }
 
-function buildSeedPrompt(count, primaryField) {
-  const hints = runContext.seedHints.slice(0, count);
+function buildSeedPrompt(count, field) {
   const directives = [
     "Return JSON only.",
     "Each value must be distinct and human plausible.",
-    "Prefer diverse surnames, regions, and professions if context implies names.",
+    "Respect the field description and keep outputs realistic for that domain.",
   ].join(" ");
 
   return {
@@ -808,15 +995,14 @@ function buildSeedPrompt(count, primaryField) {
     messages: [
       {
         role: "system",
-        content: `You invent unique values for the field "${primaryField.name}" described as "${primaryField.description || "no description"}". Output JSON array of strings.`,
+        content: `You invent unique values for the field "${field.name}" described as "${field.description || "no description"}". Output JSON array of strings.`,
       },
       {
         role: "user",
         content: [
           `DATASET: ${state.schema.name}`,
-          `FIELD: ${primaryField.name} (${primaryField.type})`,
+          `FIELD: ${field.name} (${field.type})`,
           `COUNT: ${count}`,
-          `SEED_HINTS: ${JSON.stringify(hints)}`,
           directives,
           "Example output: [\"Aria Solberg\", \"Mateo Idris\", \"Liang Novak\"]",
         ].join("\n"),
@@ -825,7 +1011,7 @@ function buildSeedPrompt(count, primaryField) {
   };
 }
 
-function parseSeedList(content) {
+function parseSeedList(content, field) {
   let text = (content || "").trim();
   if (!text) throw new Error("Empty seed response");
   const fenced = text.match(/```json([\s\S]*?)```/i);
@@ -846,13 +1032,12 @@ function parseSeedList(content) {
   if (!Array.isArray(parsed)) {
     throw new Error("Seed payload not array");
   }
-  const primaryField = state.primaryField;
   return parsed
     .map((entry) => {
       if (typeof entry === "string") return entry.trim();
       if (entry && typeof entry === "object") {
-        if (primaryField && entry[primaryField.name]) {
-          return String(entry[primaryField.name]).trim();
+        if (field && entry[field.name]) {
+          return String(entry[field.name]).trim();
         }
         const firstValue = Object.values(entry)[0];
         return firstValue ? String(firstValue).trim() : "";
@@ -862,7 +1047,7 @@ function parseSeedList(content) {
     .filter((value) => value && value.length > 1);
 }
 
-function ensureUniqueSeeds(seeds, count) {
+function ensureUniqueSeeds(seeds, count, field) {
   const result = [];
   const seen = new Set();
   seeds.forEach((seed) => {
@@ -872,55 +1057,56 @@ function ensureUniqueSeeds(seeds, count) {
     result.push(seed);
   });
   while (result.length < count) {
-    const fallback = generateFallbackSeed(seen);
+    const fallback = generateFallbackSeed(seen, field);
     result.push(fallback);
     seen.add(fallback.toLowerCase());
   }
   return result.slice(0, count);
 }
 
-function generateFallbackSeed(existingSet) {
-  const adjective = capitalize(
-    SEED_ADJECTIVES[Math.floor(Math.random() * SEED_ADJECTIVES.length)]
-  );
-  const noun = capitalize(
-    SEED_NOUNS[Math.floor(Math.random() * SEED_NOUNS.length)]
-  );
-  const token = randomToken();
-  let candidate = `${adjective} ${noun} ${token}`;
+function generateFallbackSeed(existingSet, field) {
+  let candidate = "";
+  if (field && /name/i.test(field.name)) {
+    candidate = `${sample(FALLBACK_FIRST_NAMES)} ${sample(FALLBACK_LAST_NAMES)}`;
+  } else if (field && /title|role|job/i.test(field.name)) {
+    candidate = sample(FALLBACK_JOB_TITLES);
+  } else {
+    const adjective = capitalize(
+      SEED_ADJECTIVES[Math.floor(Math.random() * SEED_ADJECTIVES.length)]
+    );
+    const noun = capitalize(
+      SEED_NOUNS[Math.floor(Math.random() * SEED_NOUNS.length)]
+    );
+    candidate = `${adjective} ${noun}`;
+  }
   let attempts = 0;
   while (existingSet.has(candidate.toLowerCase()) && attempts < 5) {
-    candidate = `${adjective} ${noun} ${randomToken()}`;
+    candidate = `${candidate} ${randomToken()}`;
     attempts += 1;
   }
   return candidate;
 }
 
-function getPrimaryField() {
-  const fields = state.schema.fields || [];
-  const eligible = fields.filter((field) =>
-    ["string", "text"].includes(field.type)
-  );
-  if (!eligible.length) return null;
-  const nameLike = eligible.find((field) => /name/i.test(field.name));
-  return nameLike || eligible[0];
+function sample(list) {
+  return list[Math.floor(Math.random() * list.length)];
 }
 
-function buildGenerationPrompt(index, primaryValue) {
+function buildGenerationPrompt(index, seedHints = {}) {
   const seedHint =
     runContext.seedHints[index] ||
     `fallback-seed-${index + 1}-${randomToken()}`;
   const seedBrief = describeSeed(seedHint);
-  const primaryField = state.primaryField;
+  const seededFields = Object.keys(seedHints);
   const fieldRequirements = state.schema.fields
     .map((field) => {
-      if (primaryField && primaryValue && field.name === primaryField.name) {
-        return `* ${field.name} (${field.type}) — REQUIRED. Use the exact value "${primaryValue}" (seeded unique value).`;
+      if (seededFields.includes(field.name)) {
+        return `* ${field.name} (${field.type}) — REQUIRED. Use the seed hint "${seedHints[field.name]}" as inspiration to craft a natural ${field.description || field.name}. Convert slugged tokens into realistic wording (e.g., "solar-falcon-698960" → "Solara Falcon"), and feel free to expand with suffixes.`;
       }
       return `* ${field.name} (${field.type}) — REQUIRED, must be non-empty and reflect ${field.description || "the field description"}.`;
     })
     .join("\n");
   const forbiddenText = buildForbiddenValuesSummary();
+  const distributionGuidance = buildDistributionGuidance();
   const recentRecords = state.dataset.slice(-5);
   const schemaSummary = JSON.stringify(
     {
@@ -941,7 +1127,7 @@ function buildGenerationPrompt(index, primaryValue) {
     "Use the EXACT field keys provided; casing and spelling must match precisely.",
     "Every field is mandatory and must hold a plausible, non-empty value appropriate for its type.",
     "Every record must be unique; if your draft matches earlier data, adjust it internally before responding.",
-    "Always let the provided SEED_BRIEF influence names, numbers, and story elements so each record feels distinct.",
+    "Always let the provided SEED_BRIEF and FIELD_SEED_HINTS influence names, numbers, and story elements so each record feels distinct, but translate hints into natural human-friendly wording.",
   ].join(" ");
 
   const uniquenessDirectives = [
@@ -954,13 +1140,15 @@ function buildGenerationPrompt(index, primaryValue) {
     `SEED_HINT: ${seedHint}`,
     `SEED_BRIEF: ${seedBrief}`,
     `REQUEST: Record ${index + 1} of ${state.schema.recordCount} for dataset "${state.schema.name}".`,
-    primaryField && primaryValue
-      ? `PRIMARY_FIELD_NAME: ${primaryField.name}\nPRIMARY_VALUE (use exactly): ${primaryValue}`
+    seededFields.length
+      ? `FIELD_SEED_HINTS (transform and keep unique): ${JSON.stringify(seedHints, null, 2)}`
       : null,
     "SCHEMA (JSON):",
     schemaSummary,
     "FIELD_REQUIREMENTS:",
     fieldRequirements,
+    "DISTRIBUTION_GUIDANCE:",
+    distributionGuidance,
     "FORBIDDEN_FIELD_VALUES (never repeat these exact values):",
     forbiddenText,
     "RECENT_RECORDS (do NOT repeat any values):",
@@ -1115,4 +1303,16 @@ function getRecentValuesForField(fieldName, limit = 6) {
     values.push(String(value));
   }
   return values;
+}
+
+function normalizeSchema(schema) {
+  const normalized = { ...schema };
+  normalized.fields = (schema.fields || []).map((field, index) => ({
+    distribution: typeof field.distribution === "number" ? clampNumber(field.distribution, 0, 1) : 0,
+    ...field,
+    id: field.id || `field-${index + 1}`,
+  }));
+  normalized.name = schema.name || "MyDataset";
+  normalized.recordCount = clampNumber(schema.recordCount || 1, 1, 1000);
+  return normalized;
 }

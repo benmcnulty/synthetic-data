@@ -89,6 +89,28 @@ textarea {
   align-items: center;
 }
 
+.field-row .distribution-control {
+  grid-column: 1 / span 3;
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.field-row .distribution-control input[type="range"] {
+  width: 100%;
+}
+
+.distribution-hint {
+  display: block;
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.distribution-value {
+  font-weight: 600;
+  margin-left: 0.35rem;
+  color: #0f172a;
+}
+
 .generation-controls {
   display: flex;
   flex-wrap: wrap;

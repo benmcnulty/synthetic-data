@@ -84,6 +84,14 @@
         <option value="text">text</option>
       </select>
       <input type="text" class="field-description" placeholder="Description">
+      <div class="distribution-control">
+        <label>
+          Distribution
+          <input type="range" class="field-distribution" min="0" max="1" step="0.05">
+          <span class="distribution-hint">0 = unique, 1 = shared</span>
+          <span class="distribution-value">0.00</span>
+        </label>
+      </div>
       <button class="icon-button remove-field" title="Remove field">✖</button>
     </div>
   </template>
