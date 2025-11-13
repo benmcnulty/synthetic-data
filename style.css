@@ -41,6 +41,23 @@ main {
   font-size: 0.95rem;
 }
 
+.connection-group + .connection-group {
+  margin-top: 1rem;
+}
+
+.connection-group h3 {
+  margin: 0 0 0.4rem;
+  font-size: 1rem;
+  color: #0f172a;
+}
+
+.connection-panel hr,
+#connection-panel hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 1rem 0;
+}
+
 .icon-button {
   border: none;
   background: transparent;
@@ -116,6 +133,13 @@ textarea {
   flex-wrap: wrap;
   gap: 0.8rem;
   margin-bottom: 1rem;
+}
+
+.export-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin: 1rem 0;
 }
 
 button {

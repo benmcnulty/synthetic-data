@@ -15,20 +15,41 @@
   <main>
     <section class="panel" id="connection-panel">
       <h2>Connection &amp; Model</h2>
-      <div class="inline-edit" data-field="base-url">
-        <span id="base-url-display">Base URL: <strong id="base-url-text"></strong></span>
-        <button id="edit-base-url" class="icon-button" title="Edit base URL">✏️</button>
+      <div class="connection-group">
+        <h3>Inference API</h3>
+        <div class="inline-edit" data-field="base-url">
+          <span id="base-url-display">Base URL: <strong id="base-url-text"></strong></span>
+          <button id="edit-base-url" class="icon-button" title="Edit base URL">✏️</button>
+        </div>
+        <div class="connection-actions">
+          <button id="fetch-models">Fetch Model List</button>
+          <label>
+            Default Model
+            <select id="model-select">
+              <option value="">Select model</option>
+            </select>
+          </label>
+        </div>
+        <p id="connection-status" class="status-text">No fetch attempted yet.</p>
       </div>
-      <div class="connection-actions">
-        <button id="fetch-models">Fetch Model List</button>
-        <label>
-          Default Model
-          <select id="model-select">
-            <option value="">Select model</option>
-          </select>
-        </label>
+      <hr>
+      <div class="connection-group">
+        <h3>Embedding API</h3>
+        <div class="inline-edit" data-field="embedding-base-url">
+          <span id="embedding-base-url-display">Base URL: <strong id="embedding-base-url-text"></strong></span>
+          <button id="edit-embedding-base-url" class="icon-button" title="Edit embedding base URL">✏️</button>
+        </div>
+        <div class="connection-actions">
+          <button id="fetch-embedding-models">Fetch Embedding Models</button>
+          <label>
+            Embedding Model
+            <select id="embedding-model-select">
+              <option value="">Select model</option>
+            </select>
+          </label>
+        </div>
+        <p id="embedding-status" class="status-text">No fetch attempted yet.</p>
       </div>
-      <p id="connection-status" class="status-text">No fetch attempted yet.</p>
     </section>
 
     <section class="panel" id="schema-panel">
@@ -69,6 +90,16 @@
       <div id="event-log" class="log-window"></div>
       <h3>Dataset</h3>
       <div id="dataset-table-container"></div>
+    </section>
+
+    <section class="panel" id="export-panel">
+      <h2>Export &amp; Embeddings</h2>
+      <p>Download the generated dataset as SQL or export embeddings via the configured embedding model.</p>
+      <div class="export-controls">
+        <button id="export-db" class="secondary">Export Database (.sql)</button>
+        <button id="export-embeddings" class="primary">Export Embeddings (.json)</button>
+      </div>
+      <p id="export-status" class="status-text">Exports idle.</p>
     </section>
   </main>
 

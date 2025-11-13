@@ -1,6 +1,8 @@
 const STORAGE_KEYS = {
   baseUrl: "synthetic.baseUrl",
   defaultModel: "synthetic.defaultModel",
+  embeddingBaseUrl: "synthetic.embeddingBaseUrl",
+  embeddingModel: "synthetic.embeddingModel",
   schema: "synthetic.schema",
   dataset: "synthetic.dataset",
 };
@@ -90,7 +92,11 @@ const state = {
   baseUrl: "http://localhost:11434",
   defaultModel: "",
   models: [],
+  embeddingBaseUrl: "http://localhost:11434",
+  embeddingModel: "",
+  embeddingModels: [],
   lastFetchStatus: null,
+  embeddingFetchStatus: null,
   schema: clone(DEFAULT_SCHEMA),
   dataset: [],
   generating: false,
@@ -98,6 +104,8 @@ const state = {
   phase: "Idle",
   statusMessage: "Idle",
   fieldSeedPlans: {},
+  exportStatus: "Exports idle.",
+  exportingEmbeddings: false,
   stats: {
     requested: 0,
     seeded: 0,
@@ -130,6 +138,12 @@ function cacheDom() {
   dom.connectionStatus = document.getElementById("connection-status");
   dom.fetchModelsBtn = document.getElementById("fetch-models");
   dom.modelSelect = document.getElementById("model-select");
+  dom.embeddingBaseUrlDisplay = document.getElementById("embedding-base-url-display");
+  dom.embeddingBaseUrlText = document.getElementById("embedding-base-url-text");
+  dom.editEmbeddingBaseUrlBtn = document.getElementById("edit-embedding-base-url");
+  dom.fetchEmbeddingModelsBtn = document.getElementById("fetch-embedding-models");
+  dom.embeddingModelSelect = document.getElementById("embedding-model-select");
+  dom.embeddingStatus = document.getElementById("embedding-status");
   dom.datasetNameInput = document.getElementById("dataset-name");
   dom.recordCountInput = document.getElementById("record-count");
   dom.fieldsContainer = document.getElementById("fields-container");
@@ -148,6 +162,9 @@ function cacheDom() {
   dom.currentIndex = document.getElementById("current-index");
   dom.eventLog = document.getElementById("event-log");
   dom.datasetTableContainer = document.getElementById("dataset-table-container");
+  dom.exportDbBtn = document.getElementById("export-db");
+  dom.exportEmbeddingsBtn = document.getElementById("export-embeddings");
+  dom.exportStatus = document.getElementById("export-status");
 }
 
 function loadStateFromStorage() {
@@ -156,6 +173,16 @@ function loadStateFromStorage() {
 
   const storedModel = localStorage.getItem(STORAGE_KEYS.defaultModel);
   if (storedModel) state.defaultModel = storedModel;
+
+  const storedEmbeddingBaseUrl = localStorage.getItem(
+    STORAGE_KEYS.embeddingBaseUrl
+  );
+  if (storedEmbeddingBaseUrl) state.embeddingBaseUrl = storedEmbeddingBaseUrl;
+
+  const storedEmbeddingModel = localStorage.getItem(
+    STORAGE_KEYS.embeddingModel
+  );
+  if (storedEmbeddingModel) state.embeddingModel = storedEmbeddingModel;
 
   const storedSchema = localStorage.getItem(STORAGE_KEYS.schema);
   if (storedSchema) {
@@ -184,11 +211,19 @@ function loadStateFromStorage() {
 }
 
 function attachHandlers() {
-  dom.editBaseUrlBtn.addEventListener("click", () => enterBaseUrlEdit());
-  dom.fetchModelsBtn.addEventListener("click", fetchModels);
+  dom.editBaseUrlBtn.addEventListener("click", () => enterBaseUrlEdit("inference"));
+  dom.editEmbeddingBaseUrlBtn.addEventListener("click", () =>
+    enterBaseUrlEdit("embedding")
+  );
+  dom.fetchModelsBtn.addEventListener("click", fetchInferenceModels);
+  dom.fetchEmbeddingModelsBtn.addEventListener("click", fetchEmbeddingModels);
   dom.modelSelect.addEventListener("change", (e) => {
     state.defaultModel = e.target.value;
     localStorage.setItem(STORAGE_KEYS.defaultModel, state.defaultModel);
+  });
+  dom.embeddingModelSelect.addEventListener("change", (e) => {
+    state.embeddingModel = e.target.value;
+    localStorage.setItem(STORAGE_KEYS.embeddingModel, state.embeddingModel);
   });
 
   dom.datasetNameInput.addEventListener("input", (e) => {
@@ -218,35 +253,47 @@ function attachHandlers() {
     logEvent("Stop requested by user.");
   });
   dom.clearBtn.addEventListener("click", clearDataset);
+  dom.exportDbBtn.addEventListener("click", exportDatabase);
+  dom.exportEmbeddingsBtn.addEventListener("click", exportEmbeddings);
 }
 
 function renderAll() {
   dom.baseUrlText.textContent = state.baseUrl;
+  dom.embeddingBaseUrlText.textContent = state.embeddingBaseUrl;
   dom.datasetNameInput.value = state.schema.name || "MyDataset";
   dom.recordCountInput.value = state.schema.recordCount;
   renderFields();
   renderSchemaPreview();
-  populateModelSelect();
+  populateModelSelect(dom.modelSelect, state.models, state.defaultModel);
+  populateModelSelect(
+    dom.embeddingModelSelect,
+    state.embeddingModels,
+    state.embeddingModel
+  );
   updateStats();
   renderDatasetTable();
   renderLog();
+  updateExportStatus(state.exportStatus);
 }
 
-function enterBaseUrlEdit() {
+function enterBaseUrlEdit(kind = "inference") {
   if (dom.inlineInput) return;
+  const ctx = getBaseUrlContext(kind);
+  if (!ctx) return;
   const input = document.createElement("input");
   input.type = "text";
-  input.value = state.baseUrl;
+  input.value = ctx.value;
   input.className = "inline-input";
   dom.inlineInput = input;
-  dom.baseUrlDisplay.style.display = "none";
-  dom.editBaseUrlBtn.insertAdjacentElement("beforebegin", input);
+  dom.inlineEditContext = ctx;
+  ctx.displayEl.style.display = "none";
+  ctx.button.insertAdjacentElement("beforebegin", input);
   input.focus();
   input.select();
 
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
-      applyBaseUrlChange(input.value.trim());
+      applyBaseUrlChange(kind, input.value.trim());
     } else if (e.key === "Escape") {
       exitBaseUrlEdit(false);
     }
@@ -254,23 +301,55 @@ function enterBaseUrlEdit() {
   input.addEventListener("blur", () => exitBaseUrlEdit(false));
 }
 
-function applyBaseUrlChange(value) {
+function getBaseUrlContext(kind) {
+  const isEmbedding = kind === "embedding";
+  const displayEl = isEmbedding
+    ? dom.embeddingBaseUrlDisplay
+    : dom.baseUrlDisplay;
+  const textEl = isEmbedding ? dom.embeddingBaseUrlText : dom.baseUrlText;
+  const button = isEmbedding
+    ? dom.editEmbeddingBaseUrlBtn
+    : dom.editBaseUrlBtn;
+  if (!displayEl || !textEl || !button) return null;
+  return {
+    kind,
+    displayEl,
+    textEl,
+    button,
+    value: isEmbedding ? state.embeddingBaseUrl : state.baseUrl,
+    getValue: () => (isEmbedding ? state.embeddingBaseUrl : state.baseUrl),
+  };
+}
+
+function applyBaseUrlChange(kind, value) {
   if (!value) return exitBaseUrlEdit(false);
-  state.baseUrl = value;
-  localStorage.setItem(STORAGE_KEYS.baseUrl, state.baseUrl);
-  dom.baseUrlText.textContent = state.baseUrl;
+  if (kind === "embedding") {
+    state.embeddingBaseUrl = value;
+    localStorage.setItem(STORAGE_KEYS.embeddingBaseUrl, state.embeddingBaseUrl);
+    dom.embeddingBaseUrlText.textContent = state.embeddingBaseUrl;
+  } else {
+    state.baseUrl = value;
+    localStorage.setItem(STORAGE_KEYS.baseUrl, state.baseUrl);
+    dom.baseUrlText.textContent = state.baseUrl;
+  }
   exitBaseUrlEdit(true);
 }
 
 function exitBaseUrlEdit(saveApplied) {
   if (!dom.inlineInput) return;
+  const ctx = dom.inlineEditContext;
   dom.inlineInput.remove();
   dom.inlineInput = null;
-  dom.baseUrlDisplay.style.display = "";
-  if (!saveApplied) dom.baseUrlText.textContent = state.baseUrl;
+  if (ctx && ctx.displayEl) {
+    ctx.displayEl.style.display = "";
+    if (!saveApplied && ctx.textEl) {
+      ctx.textEl.textContent = ctx.getValue();
+    }
+  }
+  dom.inlineEditContext = null;
 }
 
-async function fetchModels() {
+async function fetchInferenceModels() {
   const url = normalizeBaseUrl(state.baseUrl);
   dom.connectionStatus.textContent = `Fetching models from ${url}...`;
   try {
@@ -279,7 +358,7 @@ async function fetchModels() {
     const data = await response.json();
     const models = (data.models || []).map((m) => m.name).filter(Boolean);
     state.models = models;
-    populateModelSelect();
+    populateModelSelect(dom.modelSelect, state.models, state.defaultModel);
     dom.connectionStatus.textContent = `Fetched ${models.length} models from ${url}`;
     state.lastFetchStatus = "success";
   } catch (err) {
@@ -288,22 +367,44 @@ async function fetchModels() {
   }
 }
 
-function populateModelSelect() {
-  const current = state.defaultModel;
-  dom.modelSelect.innerHTML = '<option value="">Select model</option>';
-  state.models.forEach((model) => {
+async function fetchEmbeddingModels() {
+  const url = normalizeBaseUrl(state.embeddingBaseUrl || state.baseUrl);
+  dom.embeddingStatus.textContent = `Fetching embedding models from ${url}...`;
+  try {
+    const response = await fetch(`${url}/api/tags`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    const models = (data.models || []).map((m) => m.name).filter(Boolean);
+    state.embeddingModels = models;
+    populateModelSelect(
+      dom.embeddingModelSelect,
+      state.embeddingModels,
+      state.embeddingModel
+    );
+    dom.embeddingStatus.textContent = `Fetched ${models.length} models from ${url}`;
+    state.embeddingFetchStatus = "success";
+  } catch (err) {
+    dom.embeddingStatus.textContent = `Failed to fetch embedding models: ${err.message}`;
+    state.embeddingFetchStatus = "failure";
+  }
+}
+
+function populateModelSelect(selectEl, models, currentValue) {
+  if (!selectEl) return;
+  selectEl.innerHTML = '<option value="">Select model</option>';
+  models.forEach((model) => {
     const option = document.createElement("option");
     option.value = model;
     option.textContent = model;
-    if (model === current) option.selected = true;
-    dom.modelSelect.appendChild(option);
+    if (model === currentValue) option.selected = true;
+    selectEl.appendChild(option);
   });
-  if (!state.models.length && current) {
+  if (!models.length && currentValue) {
     const option = document.createElement("option");
-    option.value = current;
-    option.textContent = current;
+    option.value = currentValue;
+    option.textContent = currentValue;
     option.selected = true;
-    dom.modelSelect.appendChild(option);
+    selectEl.appendChild(option);
   }
 }
 
@@ -424,6 +525,13 @@ function updateStats() {
   dom.generatedCount.textContent = state.stats.generated;
   dom.failedCount.textContent = state.stats.failed;
   dom.currentIndex.textContent = state.stats.currentIndex;
+}
+
+function updateExportStatus(message) {
+  state.exportStatus = message;
+  if (dom.exportStatus) {
+    dom.exportStatus.textContent = message;
+  }
 }
 
 function renderLog() {
@@ -955,6 +1063,178 @@ async function generateRecord(index, seedHints) {
     __meta: { seedHint: prompt.seedHint, seedHints },
   };
   return record;
+}
+
+function exportDatabase() {
+  if (!state.dataset.length) {
+    alert("Generate data before exporting.");
+    return;
+  }
+  const sql = buildSqlDump();
+  const filename = `synthetic-data-${Date.now()}.sql`;
+  downloadBlob(sql, filename, "application/sql");
+  logEvent(`Database export ready: ${filename}`);
+  updateExportStatus(`Database exported (${state.dataset.length} rows).`);
+}
+
+function buildSqlDump() {
+  const tableName =
+    (state.schema.name || "synthetic_data").replace(/[^\w]/g, "_") ||
+    "synthetic_data";
+  const fields = state.schema.fields || [];
+  const columnDefs = ['"id" TEXT PRIMARY KEY'];
+  fields.forEach((field) => {
+    columnDefs.push(`"${field.name}" ${mapFieldToSqlType(field.type)}`);
+  });
+  const lines = [
+    `-- Synthetic data export generated at ${new Date().toISOString()}`,
+    `CREATE TABLE IF NOT EXISTS "${tableName}" (${columnDefs.join(", ")});`,
+  ];
+  state.dataset.forEach((record) => {
+    const columns = ['"id"', ...fields.map((field) => `"${field.name}"`)];
+    const values = [
+      sqlValue(record.id),
+      ...fields.map((field) => sqlValue(record[field.name], field.type)),
+    ];
+    lines.push(
+      `INSERT INTO "${tableName}" (${columns.join(", ")}) VALUES (${values.join(
+        ", "
+      )});`
+    );
+  });
+  return lines.join("\n");
+}
+
+function mapFieldToSqlType(type) {
+  switch (type) {
+    case "integer":
+      return "INTEGER";
+    case "number":
+      return "REAL";
+    case "boolean":
+      return "BOOLEAN";
+    case "date":
+      return "TEXT";
+    case "text":
+    case "string":
+    default:
+      return "TEXT";
+  }
+}
+
+function sqlValue(value, type) {
+  if (value === undefined || value === null) return "NULL";
+  switch (type) {
+    case "integer":
+    case "number": {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : 0;
+    }
+    case "boolean":
+      return value ? 1 : 0;
+    default:
+      return `'${sqlEscape(String(value))}'`;
+  }
+}
+
+function sqlEscape(value) {
+  return value.replace(/'/g, "''");
+}
+
+async function exportEmbeddings() {
+  if (state.exportingEmbeddings) return;
+  if (!state.dataset.length) {
+    alert("Generate data before exporting embeddings.");
+    return;
+  }
+  const model = state.embeddingModel || state.defaultModel;
+  if (!model) {
+    alert("Select an embedding model first.");
+    return;
+  }
+  const baseUrl = normalizeBaseUrl(
+    state.embeddingBaseUrl || state.baseUrl || "http://localhost:11434"
+  );
+  state.exportingEmbeddings = true;
+  updateExportStatus("Embedding export in progress…");
+  const records = [];
+  try {
+    for (let i = 0; i < state.dataset.length; i += 1) {
+      const record = state.dataset[i];
+      const input = buildEmbeddingInput(record);
+      updateExportStatus(
+        `Embedding ${i + 1}/${state.dataset.length} via ${model}…`
+      );
+      const embedding = await requestEmbedding(baseUrl, model, input);
+      const { __meta, ...rest } = record;
+      records.push({
+        id: record.id,
+        embedding,
+        text: input,
+        metadata: rest,
+      });
+    }
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      model,
+      baseUrl,
+      schema: state.schema,
+      records,
+    };
+    const filename = `synthetic-embeddings-${Date.now()}.json`;
+    downloadBlob(JSON.stringify(payload, null, 2), filename, "application/json");
+    logEvent(`Embeddings export ready: ${filename}`);
+    updateExportStatus(`Embeddings exported (${records.length} rows).`);
+  } catch (err) {
+    console.error(err);
+    logEvent(`Embedding export failed: ${err.message}`);
+    alert(`Embedding export failed: ${err.message}`);
+    updateExportStatus("Embedding export failed. See log.");
+  } finally {
+    state.exportingEmbeddings = false;
+  }
+}
+
+async function requestEmbedding(baseUrl, model, input) {
+  const payload = {
+    model,
+    prompt: input,
+  };
+  const response = await fetch(`${baseUrl}/api/embeddings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Embedding HTTP ${response.status}`);
+  }
+  const data = await response.json();
+  const vector =
+    data.embedding || data.data?.[0]?.embedding || data.vector || null;
+  if (!Array.isArray(vector)) {
+    throw new Error("Embedding response missing vector");
+  }
+  return vector;
+}
+
+function buildEmbeddingInput(record) {
+  const parts = state.schema.fields
+    .map((field) => `${field.name}: ${record[field.name] ?? ""}`)
+    .join("\n");
+  return `${state.schema.name || "Dataset"} | ${record.id}\n${parts}`;
+}
+
+function downloadBlob(content, filename, type) {
+  const blob =
+    content instanceof Blob ? content : new Blob([content], { type: type || "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
 
 async function requestFieldSeeds(field, count) {
