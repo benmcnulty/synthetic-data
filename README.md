@@ -9,7 +9,7 @@ and JavaScript, with no package installation or build step.
 - Field editor, record count and schema preview.
 - Separate inference and optional embedding server/model settings.
 - Model discovery, per-record generation, bounded retries and progress/event logs.
-- Dataset table and SQL downloads, including an optional embedding export.
+- Dataset table and SQL downloads; optional embeddings are exported separately as JSON.
 - Browser storage for endpoint settings, selected models, schema and dataset.
 
 These are source-level capabilities, not a claim that every model, SQL consumer or
@@ -34,7 +34,7 @@ is required. Stop the preview with Ctrl+C.
 2. Set the inference base URL, fetch its model list and choose an installed model.
 3. Define fields and a small record count, then start generation.
 4. Inspect records and failures before exporting SQL. Configure an embedding
-   endpoint/model separately if you want the embedding export.
+   endpoint/model separately if you want the JSON embedding export.
 
 The browser calls `/api/tags`, `/api/chat` and, for embedding export,
 `/api/embeddings` on the chosen server. That server must permit the preview's
@@ -61,7 +61,7 @@ you need to remove the local dataset.
 
 No automated test suite or CI workflow is committed. A manual check should cover
 model discovery, a small dataset, invalid/unreachable endpoints, malformed model
-output, refresh persistence and SQL/embedding downloads. This documentation
+output, refresh persistence and SQL downloads and separate JSON embedding downloads. This documentation
 review did not run real inference or certify those flows.
 
 Read [`AGENTS.md`](AGENTS.md) before proposing a focused change. Include the
